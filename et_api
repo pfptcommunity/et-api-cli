@@ -1,0 +1,955 @@
+#!/bin/bash
+################################################################################
+#
+#          Name: Ludvik Jerabek
+#          Date: 03/27/2017
+#       Version: 1.2
+#
+#       Summary: Command line tool supports ET API.
+#
+#       Change History:
+#
+#       03/27/2017 - Initial Release
+#		06/06/2020 - Fixed CURL rvalue issue
+#		08/30/2021 - Fixed CURL command return codes
+#
+################################################################################
+declare -r API_AUTH="<enter_et_api_key_here>"
+declare -r API_SCHEME="https"
+declare -r API_SERVER="api.emergingthreats.net"
+declare -r API_VERSION="v1"
+declare -r REST_CERT_ARG="--insecure"
+declare -r REST_CURLRC="--header Authorization:${API_AUTH}"
+
+# Common error function
+function opt_error() {
+	echo "$*" 1>&2
+	exit 1
+}
+
+# Function to get script directory
+function get_script_dir () {
+     SOURCE="${BASH_SOURCE[0]}"
+     # While $SOURCE is a symlink, resolve it
+     while [ -h "$SOURCE" ]; do
+          DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+          SOURCE="$( readlink "$SOURCE" )"
+          # If $SOURCE was a relative symlink (so no "/" as prefix, need to resolve it relative to the symlink base directory
+          [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+     done
+     DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+     echo "$DIR"
+}
+
+# Get current location of the script
+readonly SCRIPT_PATH=$(get_script_dir)
+
+# Function makes web service calls
+# This function returns the error from CURL
+# If not file name is passed, stdout is used to display the request results
+function rest_call() {
+	# Set pipe fail so if any failures happen during a pipe we can get the overall result in $?
+	set -o pipefail
+
+	local OPTIND
+	local rval=0
+	local REST_SCHEME
+	local REST_SERVER
+	local REST_API_VERSION
+	local REST_API_SERVICE_BASE
+	local REST_API_ENDPOINT
+	local REST_API_PARAMS
+	local OUTPUT_FILE
+
+	local -r SHORTOPTS=""
+	local -r LONGOPTS="scheme:,server:,version:,service:,endpoint:,params:,output:"
+
+	# ARGS must be predefined to avoid return value of 0 after getopt call.
+	local ARGS
+	ARGS=$(getopt -s bash --options "${SHORTOPTS}" --longoptions "${LONGOPTS}" --name $(basename $0) -- "$@")
+	# Exit if required argument is missing.
+	[ $? -ne 0 ] && exit 1
+	eval set -- "$ARGS"
+
+	while true
+	do
+		case $1 in
+			--scheme)
+				REST_SCHEME="$2"
+				shift
+			;;
+			--server)
+				REST_SERVER="$2"
+				shift
+			;;
+			--version)
+				REST_API_VERSION="$2"
+				shift
+			;;
+			--service)
+				REST_API_SERVICE_BASE="$2"
+				shift
+			;;
+			--endpoint)
+				REST_API_ENDPOINT="$2"
+				shift
+			;;
+			--params)
+				REST_API_PARAMS="$2"
+				shift
+			;;
+			--output)
+				OUTPUT_FILE="$2"
+				shift
+			;;
+		    --)
+		            shift
+		            break
+		    ;;
+		    *)
+				echo "[Error] Unhanded option: $1"
+				exit 1
+			;;
+		esac
+		shift
+	done
+
+	[[ ! -z "${REST_SCHEME+x}" && ! -n "${REST_SCHEME}" ]] && opt_error "Option arugment --scheme value can not be an empty string."
+	[[ ! -z "${REST_SERVER+x}" && ! -n "${REST_SERVER}" ]] && opt_error "Option arugment --server value can not be an empty string."
+	[[ ! -z "${REST_API_VERSION+x}" && ! -n "${REST_API_VERSION}" ]] && opt_error "Option arugment --version value can not be an empty string."
+	[[ ! -z "${REST_API_SERVICE_BASE+x}" && ! -n "${REST_API_SERVICE_BASE}" ]] && opt_error "Option arugment --service value can not be an empty string."
+	[[ ! -z "${REST_API_ENDPOINT+x}" && ! -n "${REST_API_ENDPOINT}" ]] && opt_error "Option arugment --endpoint value can not be an empty string."
+	[[ ! -z "${REST_API_PARAMS+x}" && ! -n "${REST_API_PARAMS}" ]] && opt_error "Option arugment --params value can not be an empty string."
+	[[ ! -z "${OUTPUT_FILE+x}" && ! -n "${OUTPUT_FILE}" ]] && opt_error "Option arugment --output value can not be an empty string."
+
+	local REST_SERVICE
+	[ ! -z ${REST_SCHEME+x} ] && REST_SERVICE="${REST_SERVICE}${REST_SCHEME}"
+	[ ! -z ${REST_SERVER+x} ] && REST_SERVICE="${REST_SERVICE}://${REST_SERVER}"
+	[ ! -z ${REST_API_VERSION+x} ] && REST_SERVICE="${REST_SERVICE}/${REST_API_VERSION}"
+	[ ! -z ${REST_API_SERVICE_BASE+x} ] && REST_SERVICE="${REST_SERVICE}/${REST_API_SERVICE_BASE}"
+	[ ! -z ${REST_API_ENDPOINT+x} ] && REST_SERVICE="${REST_SERVICE}/${REST_API_ENDPOINT}"
+	[ ! -z ${REST_API_PARAMS+x} ] && REST_SERVICE="${REST_SERVICE} ${REST_API_PARAMS}"
+
+	# Silent only display error, No Globbing, Ouput the HTTP_CODE and DOWNLOAD_SIZE
+	local CURL_OPTS="-sS -g -G -w %{http_code}|%{size_download}"
+
+
+	# If output file is defined and not empty	
+	if [[ ! -z "${OUTPUT_FILE+x}" && -n "${OUTPUT_FILE}" ]] 
+	then
+		# Output date to a file instead of STDOUT
+		REST_SERVICE="-o ${OUTPUT_FILE} ${REST_SERVICE}"
+	else
+		# If no file is provided show errors, no globbing, header, GET
+		CURL_OPTS="-i -sS -g -G"
+	fi
+
+	# In the event we will have cerficate checks a some point
+	local CURL="${CURL_OPTS} ${REST_CERT_ARG} ${REST_CURLRC} ${REST_SERVICE}"	
+	
+	#echo "${CURL}"
+	#exit 0	
+
+	local result
+	local rval
+	local -A http_result
+
+	# If output file is defined and not empty	
+	if [[ ! -z "${OUTPUT_FILE+x}" && -n "${OUTPUT_FILE}" ]] 
+	then
+		result=$(curl ${CURL})
+		rval=$?
+		if [[ $rval -eq 0 || $result =~ ^([0-9]+\|[0-9]+)$ ]]
+		then
+			http_result[code]="$(echo -nE "$result" | cut -d'|' -f1)"
+			http_result[bytes]="$(echo -nE "$result" | cut -d'|' -f2)"
+		fi
+	else
+		# This section process the request and pushes it to .
+		result=$(curl ${CURL} | hexdump -v -e '/1 "%02X"')
+		rval=$?
+		if [ $rval -eq 0 ]
+		then
+			# Get header offset HTTP/1.0 0d0a0d0a | HTTP/1.1 may require a change
+			local offset=$(echo -nE "$result" | grep -iaob -m 1 "0d0a0d0a" | cut -d':' -f1)
+			# Extract the header leave single <offset>\r\n
+			local headers=$(echo -nE "$result" | head --bytes=$((offset+4)))
+			# Skip past the marker <offset>0D0A0D0A<start_pos> is 9 characters past the offset
+			http_result[data]=$(echo -nE "$result" | tail --bytes=+$((offset+9)))
+			# Since the data is stored in hex string we divide by 2
+			http_result[bytes]=$((${#http_result[data]}/2))
+			# Get rid of the result value.		
+			unset result
+			local IFS=$'\n'	
+			# Convert the hex back to bytes, remove the \r leaving only \n newlines
+			for i in `echo -nE "$headers" | xxd -r -p | tr -d '\r'`
+			do 
+				if [[ "$i" =~ ^(HTTP/[0-9]+[.][0-9]+)[[:space:]]+([0-9]+)[[:space:]]?(.*)$ ]]
+				then				
+					#http_result[version]="${BASH_REMATCH[1]}"
+					http_result[code]="${BASH_REMATCH[2]}"
+					http_result[status]="${BASH_REMATCH[3]}"
+				fi
+			done
+			# Print the raw data as output
+			echo -nE "${http_result[data]}" | xxd -r -p
+		fi
+	fi
+	
+	if [ $rval -eq 0 ]
+	then
+		case "${http_result[code]}" in
+			200)
+				echo "[${http_result[code]}] Success" >&2
+			;;
+			204)
+				echo "[${http_result[code]}] No content returned" >&2
+				rm -vf ${OUTPUT_FILE}
+			;;
+			401)
+				echo "[${http_result[code]}] There is no authorization information included in the request, the authorization information is incorrect, or the user is not authorized." >&2
+				rm -vf ${OUTPUT_FILE}
+			;;
+			403)
+				echo "[${http_result[code]}] The API key does not have access to the requested action or your subscription has elapsed."  >&2
+				rm -vf ${OUTPUT_FILE}
+			;;
+			404)
+				echo "[${http_result[code]}] The requested action does not exist."  >&2
+				rm -vf ${OUTPUT_FILE}
+			;;
+			408)
+				echo "[${http_result[code]}] The request took too long to complete on our side. Please reduce the amount of information you are requesting, or try again later."  >&2
+				rm -vf ${OUTPUT_FILE}
+			;;
+			429)
+				echo "[${http_result[code]}] You have exceeded your provisioned rate limit. If this becomes a regular occurrence, please contact sales to have your rate limit increased."  >&2
+				rm -vf ${OUTPUT_FILE}
+			;;
+			500)
+				echo "[${http_result[code]}] We had a problem internal to our systems. Please try again later."  >&2
+				rm -vf ${OUTPUT_FILE}
+			;;
+			*)
+				echo "[${http_result[code]}] Unhandled HTTP error" >&2
+				rm -vf ${OUTPUT_FILE}
+			;;
+		esac
+	fi
+}
+
+# General API Usage Information
+function et_usage() {
+cat << EOF
+Usage: $(basename $0) [options]
+
+This tool provides a command line interface to the ET Intelligence API.
+
+The ET Intelligence API is organized around REST with JSON responses and is designed 
+to use HTTP response codes to indicate API success/errors. We support cross-origin 
+resource sharing (CORS) to allow you to interact with our API from a client-side web
+application. JSON will be returned in all responses from the API.
+
+The ET Intelligence API can be used to get information such as up-to-date reputation
+of domains and IPs, as well as related information on our entire database of over 
+300 million malware samples.
+
+Core Endpoints (Required Option):
+
+The following argument are to be used alone and not combined with each other.
+
+EOF
+
+cat << EOF | column -s\& -t
+--repcategories &This endpoint lists all of the possible categories for reputation 
+ &categorization and a brief description of each item.
+--domains &This endpoint retrieves the current reputation scores in categories
+ &that are currently associated with the specified domain.
+--ips &This endpoint retrieves the current reputation scores in categories 
+ &that are currently associated with the specified IP.
+--samples &This endpoint retrieves metadata information for a single malware 
+ &sample.
+--sids &This endpoint retrieves the signature name for a particular signature id.
+
+EOF
+
+}
+
+# General API Usage Information
+function rcs_usage() {
+cat << EOF
+Usage: $(basename $0) --repcategories
+
+This core endpoint lists all of the possible categories for reputation categorization and a
+brief description of each item. No arguments are provided to this endpoint.
+
+EOF
+}
+
+# General API Usage Information
+function domains_usage() {
+cat << EOF
+Usage: $(basename $0) --domains
+
+This core endpoint retrieves the current reputation scores in categories that are currently
+associated with the specified domain.
+
+
+Required Arguments:
+EOF
+
+cat << EOF | column -s\& -t
+--domain &A string containing an the domain name for which to pull reputation information.
+
+EOF
+
+cat << EOF
+
+One of the following:
+
+EOF
+
+cat << EOF | column -s\& -t
+--reputation &Retrieves the current reputation scores in categories that are currently
+ &associated with the specified domain.
+--urls &Retrieves the most recent http requests made by malware to the specified domain.
+--samples &Retrieves the most recent malware samples that communicated with the specified domain.
+--ips &Retrieves the most recent IPs that have been associated with the specified domain.
+--events &Retrieves the most recent IDS events that have been observed against the specified domain.
+--nameservers &Retrieves the nameserver information related to the specified domain.
+--whois &Retrieves whois info for a single domain.
+--geoloc &Retrieves geolocation info for a single domain.
+
+EOF
+}
+
+# General API Usage Information
+function ips_usage() {
+cat << EOF
+Usage: $(basename $0) --ips
+
+This endpoint retrieves the current reputation scores in categories that are currently
+associated with the specified IP.
+
+Required Arguments:
+EOF
+
+cat << EOF | column -s\& -t
+--ip &A string containing an the IP for which to pull reputation information.
+
+EOF
+
+cat << EOF
+
+One of the following:
+
+EOF
+
+cat << EOF | column -s\& -t
+--reputation &Retrieves the current reputation scores in categories that are currently
+ &associated with the specified domain.
+--urls &Retrieves the most recent http requests made by malware to the specified domain.
+--samples &Retrieves the most recent malware samples that communicated with the specified domain.
+--domains &Retrieves the most recent domains that have been associated with the specified IP.
+--events &Retrieves the most recent IDS events that have been observed against the specified domain.
+--geoloc &Retrieves geolocation info for a single domain.
+EOF
+}
+
+# General API Usage Information
+function samples_usage() {
+cat << EOF
+Usage: $(basename $0) --samples
+
+This endpoint retrieves the current reputation scores in categories that are currently
+associated with the specified IP.
+
+Required Arguments:
+EOF
+
+cat << EOF | column -s\& -t
+--md5 &A string containing the MD5 hash of the binary.
+
+EOF
+
+cat << EOF
+
+Optional Arguments:
+
+Any one of the following switches can be used. If no arguments are passed the result
+is metadata associated with the sample. Eg. type, size, sha, and submission date.
+
+EOF
+
+cat << EOF | column -s\& -t
+--connections &Retrieves the most recent connections an individual malware sample was
+ &observed to have made.
+--dns &Retrieves the most recent dns lookups an individual malware sample was
+ &observed to have made.
+--http &Retrieves the most recent http requests an individual malware sample was 
+ &observed to have made.
+--events &Retrieves the most recent IDS events an individual malware sample was 
+ &observed to have triggered.
+EOF
+}
+
+# General API Usage Information
+function sids_usage() {
+cat << EOF
+Usage: $(basename $0) --sids
+
+This endpoint retrieves the signature name for a particular Signature (SID).
+
+Required Arguments:
+EOF
+
+cat << EOF | column -s\& -t
+--sid &A string containing the signature id.
+
+EOF
+
+cat << EOF
+
+Optional Arguments:
+
+Any one of the following switches can be used. If no arguments are passed the result
+is the signature name for a particular signature id.
+
+EOF
+
+cat << EOF | column -s\& -t
+--ips &Retrieves the IPs related to a particular signature id.
+--domains &Retrieves the Domains related to a particular signature id.
+--samples &Retrieves the most recent malware samples that communicated with
+ &the specified signature id.
+--text &Retrieves the most recent documentation available for the specified 
+ &signature id. 
+--docs &Retrieves the most recent documentation available for the specified
+ &signature id.
+--refs &Retrieves lookup references for the specified signature id.
+EOF
+}
+
+# Main function performs all of the work. This also reduces the chances of global variables being mangled.
+function rcs_main() {
+
+#if [ $# -eq 0 ]
+#then
+#	echo "Usage: $(basename $0) --repcategories [options]"
+#	echo "Try '$(basename $0) --repcategories --help' for more information."
+#	exit 1
+#fi
+
+# Used for local getopt
+local OPTIND
+local OUTPUT_FILE
+local OUTPUT_SWITCH
+local ET_API_SVC="repcategories"
+
+local -r SHORTOPTS=""
+local -r LONGOPTS="output:,help"
+
+# ARGS must be predefined to avoid return value of 0 after getopt call.
+local ARGS
+ARGS=$(getopt -s bash --options "${SHORTOPTS}" --longoptions "${LONGOPTS}" --name $(basename $0) -- "$@")
+# Exit if required argument is missing.
+[ $? -ne 0 ] && exit 1
+eval set -- "$ARGS"
+
+while true
+do
+	case $1 in
+		--help)
+			rcs_usage
+			exit 0
+		;;
+		--output)
+			# Strip slash of path
+			OUTPUT_SWITCH="--output"
+			OUTPUT_FILE="${2%/}"
+			shift
+		;;
+	    --)
+	            shift
+	            break
+	    ;;
+	    *)
+			echo "[Error] Unhanded option: $1"
+			exit 1
+		;;
+	esac
+	shift
+done
+
+
+rest_call --scheme "${API_SCHEME}" --server "${API_SERVER}" --version "${API_VERSION}" --service "${ET_API_SVC}" "${OUTPUT_SWITCH}" "${OUTPUT_FILE}"
+
+}
+
+# Main function performs all of the work. This also reduces the chances of global variables being mangled.
+function domains_main() {
+if [ $# -eq 0 ]
+then
+	echo "Usage: $(basename $0) --domains [options]"
+	echo "Try '$(basename $0) --domains --help' for more information."
+	exit 1
+fi
+
+# Used for local getopt
+local OPTIND
+local DOMAIN
+local OUTPUT_FILE
+local OUTPUT_SWITCH
+# Endpoint
+local EP
+# Endpoint Count
+local EP_COUNT=0
+local -r SHORTOPTS=""
+local -r LONGOPTS="domain:,reputation,urls,samples,ips,events,nameservers,whois,geoloc,output:,help"
+local ET_API_SVC="domains"
+
+# ARGS must be predefined to avoid return value of 0 after getopt call.
+local ARGS
+ARGS=$(getopt -s bash --options "${SHORTOPTS}" --longoptions "${LONGOPTS}" --name $(basename $0) -- "$@")
+# Exit if required argument is missing.
+[ $? -ne 0 ] && exit 1
+eval set -- "$ARGS"
+
+while true
+do
+	case $1 in
+		--domain)
+			DOMAIN="$2"
+			shift
+		;;
+		--reputation)
+			EP=reputation
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--urls)
+			EP=urls
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--samples)
+			EP=samples
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--ips)
+			EP=ips
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--events)
+			EP=events
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--nameservers)
+			EP=nameservers
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--whois)
+			EP=whois
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--geoloc)
+			EP=geoloc
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--output)
+			# Strip slash of path
+			OUTPUT_SWITCH="--output"
+			OUTPUT_FILE="${2%/}"
+			shift
+		;;
+		--help)
+			domains_usage
+			exit 0	
+		;;
+	    --)
+	            shift
+	            break
+	    ;;
+	    *)
+			echo "[Error] Unhanded option: $1"
+			exit 1
+		;;
+	esac
+	shift
+done
+
+# Valdiate Domain was Passed
+[[ -z "${DOMAIN+x}" ]] && opt_error "Option argument --domain is required."
+
+# Validate that domain was passed.
+[[ ! -z "${DOMAIN+x}" && ! -n "${DOMAIN}" ]] && opt_error "Option argument --domain value can not be an empty string."
+
+# Validate single argument for Endpoint Type was passed. We want to prevent the user from making a mistake
+[ $EP_COUNT -gt 1 ] && opt_error "Avaliable endpoint options --reputation, --urls, --samples, --ips, --events, --nameservers, --whois and --geoloc can not be combined."
+
+# Validate single argument for Endpoint Type was passed. We want to prevent the user from making a mistake
+[ $EP_COUNT -eq 0 ] && opt_error "Endpoint option --reputation, --urls, --samples, --ips, --events, --nameservers, --whois or --geoloc must be specified."
+
+# Validate that all defined variables are not empty
+[[ ! -z "${OUTPUT_FILE+x}" && ! -n "${OUTPUT_FILE}" ]] && opt_error "Option argument --output value can not be an empty string."
+
+# Validate output file is not a directory
+[[ ! -z "${OUTPUT_FILE+x}" && -d "${OUTPUT_FILE}" ]] && opt_error "Option argument --output value can not be a directory."
+
+# Concat and strip slash if EP was empty
+EP=${DOMAIN}/${EP}
+EP=${EP%/}
+
+rest_call --scheme "${API_SCHEME}" --server "${API_SERVER}" --version "${API_VERSION}" --service "${ET_API_SVC}" --endpoint "${EP}" "${OUTPUT_SWITCH}" "${OUTPUT_FILE}"
+}
+
+# Main function performs all of the work. This also reduces the chances of global variables being mangled.
+function ips_main() {
+if [ $# -eq 0 ]
+then
+	echo "Usage: $(basename $0) --ips [options]"
+	echo "Try '$(basename $0) --ips --help' for more information."
+	exit 1
+fi
+
+# Used for local getopt
+local OPTIND
+local IP
+local OUTPUT_FILE
+local OUTPUT_SWITCH
+# Endpoint
+local EP
+# Endpoint Count
+local EP_COUNT=0
+local -r SHORTOPTS=""
+local -r LONGOPTS="ip:,reputation,urls,samples,domains,events,nameservers,whois,geoloc,output:,help"
+local ET_API_SVC="ips"
+
+# ARGS must be predefined to avoid return value of 0 after getopt call.
+local ARGS
+ARGS=$(getopt -s bash --options "${SHORTOPTS}" --longoptions "${LONGOPTS}" --name $(basename $0) -- "$@")
+# Exit if required argument is missing.
+[ $? -ne 0 ] && exit 1
+eval set -- "$ARGS"
+
+while true
+do
+	case $1 in
+		--ip)
+			IP="$2"
+			shift
+		;;
+		--reputation)
+			EP=reputation
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--urls)
+			EP=urls
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--samples)
+			EP=samples
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--domains)
+			EP=domains
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--events)
+			EP=events
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--geoloc)
+			EP=geoloc
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--output)
+			# Strip slash of path
+			OUTPUT_SWITCH="--output"
+			OUTPUT_FILE="${2%/}"
+			shift
+		;;
+		--help)
+			ips_usage
+			exit 0	
+		;;
+	    --)
+	            shift
+	            break
+	    ;;
+	    *)
+			echo "[Error] Unhanded option: $1"
+			exit 1
+		;;
+	esac
+	shift
+done
+
+# Valdiate Domain was Passed
+[[ -z "${IP+x}" ]] && opt_error "Option argument --ip is required."
+
+# Validate that domain was passed.
+[[ ! -z "${IP+x}" && ! -n "${IP}" ]] && opt_error "Option argument --ip value can not be an empty string."
+
+# Validate single argument for Endpoint Type was passed. We want to prevent the user from making a mistake
+[ $EP_COUNT -gt 1 ] && opt_error "Avaliable endpoint options --reputation, --urls, --samples, --domains, --events and --geoloc can not be combined."
+
+# Validate single argument for Endpoint Type was passed. We want to prevent the user from making a mistake
+[ $EP_COUNT -eq 0 ] && opt_error "Endpoint option --reputation, --urls, --samples, --domains, --events or --geoloc must be specified."
+
+# Validate that all defined variables are not empty
+[[ ! -z "${OUTPUT_FILE+x}" && ! -n "${OUTPUT_FILE}" ]] && opt_error "Option argument --output value can not be an empty string."
+
+# Validate output file is not a directory
+[[ ! -z "${OUTPUT_FILE+x}" && -d "${OUTPUT_FILE}" ]] && opt_error "Option argument --output value can not be a directory."
+
+# Concat and strip slash if EP was empty
+EP=${IP}/${EP}
+EP=${EP%/}
+
+rest_call --scheme "${API_SCHEME}" --server "${API_SERVER}" --version "${API_VERSION}" --service "${ET_API_SVC}" --endpoint "${EP}" "${OUTPUT_SWITCH}" "${OUTPUT_FILE}"
+}
+
+# Main function performs all of the work. This also reduces the chances of global variables being mangled.
+function samples_main() {
+if [ $# -eq 0 ]
+then
+	echo "Usage: $(basename $0) --samples [options]"
+	echo "Try '$(basename $0) --samples --help' for more information."
+	exit 1
+fi
+
+# Used for local getopt
+local OPTIND
+local MD5
+local OUTPUT_FILE
+local OUTPUT_SWITCH
+# Endpoint
+local EP
+# Endpoint Count
+local EP_COUNT=0
+local -r SHORTOPTS=""
+local -r LONGOPTS="md5:,connections,dns,http,events,output:,help"
+local ET_API_SVC="samples"
+
+# ARGS must be predefined to avoid return value of 0 after getopt call.
+local ARGS
+ARGS=$(getopt -s bash --options "${SHORTOPTS}" --longoptions "${LONGOPTS}" --name $(basename $0) -- "$@")
+# Exit if required argument is missing.
+[ $? -ne 0 ] && exit 1
+eval set -- "$ARGS"
+
+while true
+do
+	case $1 in
+		--md5)
+			MD5="$2"
+			shift
+		;;
+		--connections)
+			EP=connections
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--dns)
+			EP=dns
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--http)
+			EP=http
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--events)
+			EP=events
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--output)
+			# Strip slash of path
+			OUTPUT_SWITCH="--output"
+			OUTPUT_FILE="${2%/}"
+			shift
+		;;
+		--help)
+			samples_usage
+			exit 0	
+		;;
+	    --)
+	            shift
+	            break
+	    ;;
+	    *)
+			echo "[Error] Unhanded option: $1"
+			exit 1
+		;;
+	esac
+	shift
+done
+
+# Valdiate Domain was Passed
+[[ -z "${MD5+x}" ]] && opt_error "Option argument --md5 is required."
+
+# Validate that domain was passed.
+[[ ! -z "${MD5+x}" && ! -n "${MD5}" ]] && opt_error "Option argument --md5 value can not be an empty string."
+
+# Validate single argument for Endpoint Type was passed. We want to prevent the user from making a mistake
+[ $EP_COUNT -gt 1 ] && opt_error "Avaliable endpoint options --connections, --dns, --http and --events can not be combined."
+
+# Validate that all defined variables are not empty
+[[ ! -z "${OUTPUT_FILE+x}" && ! -n "${OUTPUT_FILE}" ]] && opt_error "Option argument --output value can not be an empty string."
+
+# Validate output file is not a directory
+[[ ! -z "${OUTPUT_FILE+x}" && -d "${OUTPUT_FILE}" ]] && opt_error "Option argument --output value can not be a directory."
+
+# Concat and strip slash if EP was empty
+EP=${MD5}/${EP}
+EP=${EP%/}
+
+rest_call --scheme "${API_SCHEME}" --server "${API_SERVER}" --version "${API_VERSION}" --service "${ET_API_SVC}" --endpoint "${EP}" "${OUTPUT_SWITCH}" "${OUTPUT_FILE}"
+
+}
+
+# Main function performs all of the work. This also reduces the chances of global variables being mangled.
+function sids_main() {
+if [ $# -eq 0 ]
+then
+	echo "Usage: $(basename $0) --sids [options]"
+	echo "Try '$(basename $0) --sids --help' for more information."
+	exit 1
+fi
+
+# Used for local getopt
+local OPTIND
+local SID
+local OUTPUT_FILE
+local OUTPUT_SWITCH
+# Endpoint
+local EP
+# Endpoint Count
+local EP_COUNT=0
+local -r SHORTOPTS=""
+local -r LONGOPTS="sid:,ips,domains,samples,text,docs,refs,output:,help"
+local ET_API_SVC="sids"
+
+# ARGS must be predefined to avoid return value of 0 after getopt call.
+local ARGS
+ARGS=$(getopt -s bash --options "${SHORTOPTS}" --longoptions "${LONGOPTS}" --name $(basename $0) -- "$@")
+# Exit if required argument is missing.
+[ $? -ne 0 ] && exit 1
+eval set -- "$ARGS"
+
+while true
+do
+	case $1 in
+		--sid)
+			SID="$2"
+			shift
+		;;
+		--ips)
+			EP=ips
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--domains)
+			EP=domains
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--samples)
+			EP=samples
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--text)
+			EP=text
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--docs)
+			EP=documentation
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--refs)
+			EP=references
+			EP_COUNT=$((EP_COUNT+1))
+		;;
+		--output)
+			# Strip slash of path
+			OUTPUT_SWITCH="--output"
+			OUTPUT_FILE="${2%/}"
+			shift
+		;;
+		--help)
+			sids_usage
+			exit 0	
+		;;
+	    --)
+	            shift
+	            break
+	    ;;
+	    *)
+			echo "[Error] Unhanded option: $1"
+			exit 1
+		;;
+	esac
+	shift
+done
+
+# Valdiate Domain was Passed
+[[ -z "${SID+x}" ]] && opt_error "Option argument --sid is required."
+
+# Validate that domain was passed.
+[[ ! -z "${SID+x}" && ! -n "${SID}" ]] && opt_error "Option argument --sid value can not be an empty string."
+
+# Validate single argument for Endpoint Type was passed. We want to prevent the user from making a mistake
+[ $EP_COUNT -gt 1 ] && opt_error "Avaliable endpoint options --ips, --domains, --samples, --text, --docs and --refs can not be combined."
+
+# Validate that all defined variables are not empty
+[[ ! -z "${OUTPUT_FILE+x}" && ! -n "${OUTPUT_FILE}" ]] && opt_error "Option argument --output value can not be an empty string."
+
+# Validate output file is not a directory
+[[ ! -z "${OUTPUT_FILE+x}" && -d "${OUTPUT_FILE}" ]] && opt_error "Option argument --output value can not be a directory."
+
+# Concat and strip slash if EP was empty
+EP=${SID}/${EP}
+EP=${EP%/}
+
+rest_call --scheme "${API_SCHEME}" --server "${API_SERVER}" --version "${API_VERSION}" --service "${ET_API_SVC}" --endpoint "${EP}" "${OUTPUT_SWITCH}" "${OUTPUT_FILE}"
+
+}
+
+# This function deals with API selection
+function main() {
+
+# Default no options passed message
+if [ $# -eq 0 ]
+then
+	echo "Usage: $(basename $0) [options]"
+	echo "Try '$(basename $0) --help' for more information."
+	exit 1
+fi
+
+local first_arg=$1
+shift
+
+# Forward the arguments to the proper main function.
+case $first_arg in
+	--repcategories)
+		rcs_main "$@"
+	;;
+	--domains)
+		domains_main "$@"
+	;;
+	--ips)
+		ips_main "$@"
+	;;
+	--samples)
+		samples_main "$@"
+	;;
+	--sids)
+		sids_main "$@"
+	;;
+	--help)
+		et_usage
+		exit 0	
+	;;
+	*)
+		opt_error "Invalid arguments: '$(basename $0) --help' for more information."
+	;;
+esac
+}
+
+# Call entrypoint
+main "$@"
