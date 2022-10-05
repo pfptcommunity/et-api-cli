@@ -33,15 +33,15 @@ declare -r API_AUTH="<enter_et_api_key_here>"
 ### Showing usage for SIDS
 ![et_command_line_options_sids](https://user-images.githubusercontent.com/83429267/194113973-035096fe-20b0-44b9-81ef-45ade7f9320b.png)
 
-# Usage
-
-The following is an example of how to pull reputation categories from ET API and formatting it pretty with jq (pretty json):
+# Basic Usage Examples
+### Query Reputation Categories
+The following is an example of how to pull reputation categories from ET API (pretty json):
 ![et_command_line_options_query_categories](https://user-images.githubusercontent.com/83429267/194114411-8bc3ba0a-38ef-4e6c-952b-8b2be065c51b.png)
 
-The following is an example of how to pull reputation categories from ET API and formatting it pretty with jq (list format):
+The following is an example of how to pull reputation categories from ET API (list format):
 ![et_command_line_options_query_categories_jq](https://user-images.githubusercontent.com/83429267/194114454-422486a3-e5e9-45fd-9b18-fa1e8589c629.png)
 
-Query IP Geo Location:
+### Query IP Geo Location
 ![et_command_line_options_query_ip_rep](https://user-images.githubusercontent.com/83429267/194114380-06880ba3-4fc5-4243-9711-ac830ed9f224.png)
 
 # Revisions
